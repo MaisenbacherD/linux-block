@@ -1039,8 +1039,12 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 		 * namespace capacity to zero to prevent any I/O.
 		 */
 		if (!blk_integrity_rq(req)) {
-			if (WARN_ON_ONCE(!nvme_ns_has_pi(ns->head)))
+			if (!nvme_ns_has_pi(ns->head)) {
+				pr_debug_ratelimited("nvme: %s: metadata (ms=%u) without PI or integrity request, returning NOTSUPP\n",
+						     ns->disk->disk_name,
+						     ns->head->ms);
 				return BLK_STS_NOTSUPP;
+			}
 			control |= NVME_RW_PRINFO_PRACT;
 			nvme_set_ref_tag(ns, cmnd, req);
 		}
@@ -1832,8 +1836,29 @@ static bool nvme_init_integrity(struct nvme_ns_head *head,
 	 * insert/strip it, which is not possible for other kinds of metadata.
 	 */
 	if (!IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY) ||
-	    !(head->features & NVME_NS_METADATA_SUPPORTED))
-		return nvme_ns_has_pi(head);
+	    !(head->features & NVME_NS_METADATA_SUPPORTED)) {
+		bool has_pi = nvme_ns_has_pi(head);
+
+		/*
+		 * For PCIe EXT_LBAS non-PI namespaces the block layer sets
+		 * capacity to 0 (we return false) to prevent block I/O, but a
+		 * cached-rq bio may bypass bio_queue_enter freeze serialisation
+		 * and reach nvme_setup_rw() with head->ms != 0 and no
+		 * REQ_INTEGRITY set.  Populate bi->metadata_size so that
+		 * bio_integrity_action() returns non-zero and bio_integrity_prep()
+		 * sets REQ_INTEGRITY on any such bio, preventing the WARN_ON_ONCE
+		 * at nvme_setup_rw() (addressed by patch 1/2).
+		 *
+		 * NOTE: only metadata_size is populated; no csum or PI profile is
+		 * configured.  Actual data integrity for EXT_LBAS non-PI workloads
+		 * is untested; this patch is RFC for direction discussion.
+		 */
+		if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY) &&
+		    (head->features & NVME_NS_EXT_LBAS) &&
+		    head->ms && !has_pi)
+			bi->metadata_size = head->ms;
+		return has_pi;
+	}
 
 	switch (head->pi_type) {
 	case NVME_NS_DPS_PI_TYPE3:
