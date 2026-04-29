@@ -284,6 +284,8 @@ struct bio {
 	atomic_t		__bi_cnt;	/* pin count */
 
 	struct bio_set		*bi_pool;
+
+	void			*bi_copy_ctx;
 };
 
 #define BIO_RESET_BYTES		offsetof(struct bio, bi_max_vecs)
@@ -369,6 +371,10 @@ enum req_op {
 	REQ_OP_ZONE_RESET	= (__force blk_opf_t)17,
 	/** @REQ_OP_ZONE_RESET_ALL: reset all the zone present on the device */
 	REQ_OP_ZONE_RESET_ALL	= (__force blk_opf_t)19,
+
+	/* copy offload source and destination operations */
+	REQ_OP_COPY_SRC		= (__force blk_opf_t)20,
+	REQ_OP_COPY_DST		= (__force blk_opf_t)21,
 
 	/* Driver private requests */
 	/* private: */
@@ -461,6 +467,17 @@ static inline bool op_is_write(blk_opf_t op)
 	return !!(op & (__force blk_opf_t)1);
 }
 
+static inline bool op_is_copy(blk_opf_t op)
+{
+	switch (op & REQ_OP_MASK) {
+	case REQ_OP_COPY_DST:
+	case REQ_OP_COPY_SRC:
+		return true;
+	default:
+		return false;
+	}
+}
+
 /*
  * Check if the bio or request is one that needs special treatment in the
  * flush state machine.
@@ -516,6 +533,46 @@ struct blk_rq_stat {
 	u64 max;
 	u32 nr_samples;
 	u64 batch;
+};
+
+/* A single input or output segment descriptor. */
+struct blk_copy_seg {
+	loff_t pos;
+	loff_t len;
+};
+
+/**
+ * struct blk_copy_params - input parameters and internal parameters for copy
+ *	operations.
+ * @in_bdev: Input block device.
+ * @in_segs: Input LBA ranges.
+ * @in_nseg: Number of elements in @in_segs.
+ * @out_bdev: Output block device.
+ * @out_segs: Output LBA ranges.
+ * @out_nseg: Number of elements in @out_segs.
+ * @end_io: Called after copying data finished. If %NULL, copying data happens
+ *	synchronously instead of asynchronously.
+ * @private: May be used by @end_io. Not used directly.
+ * @len: Total number of bytes to copy. Set by blkdev_copy_offload() or
+ *	blkdev_copy_onload().
+ * @copy_ctxs: Number of in-flight copy contexts associated with copy offload
+ *	operations.
+ * @lock: Protects @status updates.
+ * @status: I/O completion status.
+ */
+struct blk_copy_params {
+	struct block_device *in_bdev;
+	struct blk_copy_seg *in_segs;
+	unsigned int in_nseg;
+	struct block_device *out_bdev;
+	struct blk_copy_seg *out_segs;
+	unsigned int out_nseg;
+	void (*end_io)(const struct blk_copy_params *params);
+	void *private;
+	loff_t len;
+	atomic_t copy_ctx_count;
+	spinlock_t lock;
+	blk_status_t status;
 };
 
 #endif /* __LINUX_BLK_TYPES_H */

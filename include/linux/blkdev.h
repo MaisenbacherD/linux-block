@@ -353,13 +353,17 @@ typedef unsigned int __bitwise blk_features_t;
 #define BLK_FEAT_RAID_PARTIAL_STRIPES_EXPENSIVE \
 	((__force blk_features_t)(1u << 15))
 
+/* block driver is a stacking block driver that supports copy offloading */
+#define BLK_FEAT_STACKING_COPY_OFFL	((__force blk_features_t)(1u << 16))
+
 /*
  * Flags automatically inherited when stacking limits.
  */
 #define BLK_FEAT_INHERIT_MASK \
 	(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA | BLK_FEAT_ROTATIONAL | \
 	 BLK_FEAT_STABLE_WRITES | BLK_FEAT_ZONED | \
-	 BLK_FEAT_RAID_PARTIAL_STRIPES_EXPENSIVE)
+	 BLK_FEAT_RAID_PARTIAL_STRIPES_EXPENSIVE | \
+	 BLK_FEAT_STACKING_COPY_OFFL)
 
 /* internal flags in queue_limits.flags */
 typedef unsigned int __bitwise blk_flags_t;
@@ -414,6 +418,13 @@ struct queue_limits {
 	unsigned int		atomic_write_unit_min;
 	unsigned int		atomic_write_hw_unit_max;
 	unsigned int		atomic_write_unit_max;
+
+	/* copy offloading limits */
+	unsigned int		max_copy_hw_sectors;	/* set by block driver*/
+	uint16_t		max_copy_src_segments;	/* set by block driver*/
+	uint16_t		max_copy_dst_segments;	/* set by block driver*/
+	unsigned int		max_user_copy_sectors;	/* set via sysfs */
+	unsigned int		max_copy_sectors;	/* min() of the above */
 
 	unsigned short		max_segments;
 	unsigned short		max_integrity_segments;
@@ -1272,6 +1283,8 @@ void __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 		sector_t nr_sects, gfp_t gfp_mask, struct bio **biop);
 int blkdev_issue_secure_erase(struct block_device *bdev, sector_t sector,
 		sector_t nr_sects, gfp_t gfp);
+int blkdev_copy_offload(struct blk_copy_params *params);
+int blkdev_copy_onload(struct blk_copy_params *params);
 
 #define BLKDEV_ZERO_NOUNMAP	(1 << 0)  /* do not free blocks */
 #define BLKDEV_ZERO_NOFALLBACK	(1 << 1)  /* don't write explicit zeroes */
@@ -1452,6 +1465,11 @@ static inline unsigned int bdev_max_discard_sectors(struct block_device *bdev)
 static inline unsigned int bdev_discard_granularity(struct block_device *bdev)
 {
 	return bdev_limits(bdev)->discard_granularity;
+}
+
+static inline unsigned int bdev_max_copy_sectors(struct block_device *bdev)
+{
+	return bdev_get_queue(bdev)->limits.max_copy_sectors;
 }
 
 static inline unsigned int
