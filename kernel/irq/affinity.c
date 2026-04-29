@@ -8,6 +8,24 @@
 #include <linux/slab.h>
 #include <linux/cpu.h>
 #include <linux/group_cpus.h>
+#include <linux/sched/isolation.h>
+
+/**
+ * irq_spread_hk_filter - Restrict an interrupt affinity mask to housekeeping CPUs
+ * @mask:            The interrupt affinity mask to filter (in/out)
+ * @hk_mask:         The system's housekeeping CPU mask
+ *
+ * Intersects @mask with @hk_mask to keep interrupts off isolated CPUs.
+ * If this intersection is empty (meaning all targeted CPUs were isolated),
+ * it falls back to the online housekeeping CPUs to guarantee a valid
+ * routing destination.
+ */
+static void irq_spread_hk_filter(struct cpumask *mask,
+				 const struct cpumask *hk_mask)
+{
+	if (!cpumask_and(mask, mask, hk_mask))
+		cpumask_and(mask, hk_mask, data_race(cpu_online_mask));
+}
 
 static void default_calc_sets(struct irq_affinity *affd, unsigned int affvecs)
 {
@@ -27,6 +45,8 @@ irq_create_affinity_masks(unsigned int nvecs, struct irq_affinity *affd)
 {
 	unsigned int affvecs, curvec, usedvecs, i;
 	struct irq_affinity_desc *masks = NULL;
+	const struct cpumask *hk_mask = housekeeping_cpumask(HK_TYPE_IO_QUEUE);
+	bool hk_enabled = housekeeping_enabled(HK_TYPE_IO_QUEUE);
 
 	/*
 	 * Determine the number of vectors which need interrupt affinities
@@ -70,15 +90,25 @@ irq_create_affinity_masks(unsigned int nvecs, struct irq_affinity *affd)
 	 */
 	for (i = 0, usedvecs = 0; i < affd->nr_sets; i++) {
 		unsigned int nr_masks, this_vecs = affd->set_size[i];
-		struct cpumask *result = group_cpus_evenly(this_vecs, &nr_masks);
+		struct cpumask *result;
+
+		if (affd->mask)
+			result = group_mask_cpus_evenly(this_vecs, affd->mask,
+							&nr_masks);
+		else
+			result = group_cpus_evenly(this_vecs, &nr_masks);
 
 		if (!result) {
 			kfree(masks);
 			return NULL;
 		}
 
-		for (int j = 0; j < nr_masks; j++)
+		for (int j = 0; j < nr_masks; j++) {
 			cpumask_copy(&masks[curvec + j].mask, &result[j]);
+			if (hk_enabled)
+				irq_spread_hk_filter(&masks[curvec + j].mask,
+						     hk_mask);
+		}
 		kfree(result);
 
 		curvec += nr_masks;
@@ -115,7 +145,9 @@ unsigned int irq_calc_affinity_vectors(unsigned int minvec, unsigned int maxvec,
 	if (resv > minvec)
 		return 0;
 
-	if (affd->calc_sets)
+	if (affd->mask)
+		set_vecs = cpumask_weight(affd->mask);
+	else if (affd->calc_sets)
 		set_vecs = maxvec - resv;
 	else
 		set_vecs = cpumask_weight(cpu_possible_mask);
